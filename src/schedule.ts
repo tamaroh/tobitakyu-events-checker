@@ -1,4 +1,4 @@
-import { load } from 'cheerio'
+import { load } from 'cheerio/slim'
 
 export type EventRecord = {
   venueName: string

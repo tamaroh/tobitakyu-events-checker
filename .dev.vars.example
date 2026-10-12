@@ -1,0 +1,1 @@
+DATABASE_URL=postgresql://your-user-name@localhost:5432/tobitakyu_events_checker

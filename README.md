@@ -108,75 +108,91 @@ events テーブルを作成する
 - 部分的に取得失敗した場合は、表示可能なイベント一覧に加えて警告メッセージを表示する
 - スマートフォン表示を考慮したシンプルなレイアウトにする
 
-## 技術要件
-- Backend: Hono
-- Frontend: React + TypeScript
-- DB: PostgreSQL
-- 環境変数でDB接続文字列を受け取る
+## 実行環境
+- Backend: Hono / Cloudflare Workers（Node.js互換モード）
+- Frontend: `public/index.html` / `public/style.css`（Workers Static Assets）
+- DB: PostgreSQL（既存テーブルを継続利用）
+- Workers入口: `src/index.ts`、Render / Node.js入口: `src/node.ts`
 
-必要な環境変数:
-- `DATABASE_URL`
-- `PORT`（未指定時は 3000 を使用）
-
-## ローカル起動手順
-### 前提
-- Node.js がインストールされていること
-- PostgreSQL が利用できること
-
-### 1. 依存関係をインストールする
+## Workersでローカル実行
+Node.js 22以降とPostgreSQLを用意してください。
 
 ```bash
 npm install
+cp .dev.vars.example .dev.vars
 ```
 
-### 2. PostgreSQL を起動する
-Homebrew を使う場合:
-
-```bash
-brew install postgresql@17
-brew services start postgresql@17
-```
-
-### 3. 開発用データベースを作成する
-
-```bash
-createdb tobitakyu_events_checker
-```
-
-### 4. 環境変数を設定する
-
-```bash
-cp .env.example .env
-```
-
-Homebrew で PostgreSQL を起動した場合は、macOS のユーザー名を使って `DATABASE_URL` を設定する。
-
-例:
-
-```env
-DATABASE_URL=postgresql://your-user-name@localhost:5432/tobitakyu_events_checker
-PORT=3000
-```
-
-### 5. 開発サーバーを起動する
+`.dev.vars` の `DATABASE_URL` をローカルDBの接続文字列に変更し、起動します。
 
 ```bash
 npm run dev
 ```
 
-ブラウザで `http://localhost:3000` にアクセスする。
-
-### 6. 動作確認
-- 初回アクセス時に当月データが自動取得される
-- `GET /api/events/today` で当日イベントを確認できる
-- `POST /api/events/refresh` で当月データを再取得できる
-
-API を直接確認する例:
+`http://localhost:8787` にアクセスしてください。接続情報はコミットしません。
+Workersでは `PORT` や `dotenv` を使用せず、リクエストのbindingsから設定を読み取ります。
 
 ```bash
-curl http://localhost:3000/api/events/today
-curl -X POST http://localhost:3000/api/events/refresh
+npm test
+npm run build
+npm run build:worker
 ```
+
+`build:worker` はデプロイせずWorkers用のバンドルを検証します。
+
+## Cloudflare Workersへのデプロイ
+
+### PostgreSQLへ直接接続する場合
+Cloudflareから接続できるDBの外部接続URLを使用してください。
+Renderの内部ホスト名やローカルの `localhost` は本番Workersから接続できません。
+既存DBを利用する場合、テーブルの移行は不要です。
+
+```bash
+npx wrangler login
+npx wrangler secret put DATABASE_URL
+npm run deploy
+```
+
+`secret put` の入力時に本番の接続文字列を指定します。
+DB側で要求されるSSL設定もURLに含めてください。
+ローカルの `.env` / `.dev.vars` の内容はデプロイ先には反映されません。
+
+### Hyperdriveを利用する場合
+Hyperdriveを既存のPostgreSQLに接続し、`wrangler.jsonc` に以下を追加します。
+DBキャッシュはアプリ側で管理するため、Hyperdriveのクエリキャッシュは無効にしてください。
+
+```bash
+npx wrangler hyperdrive create tobitakyu-events --connection-string="<本番DBの外部接続URL>" --caching-disabled
+```
+
+```json
+"hyperdrive": [{ "binding": "HYPERDRIVE", "id": "<作成されたID>" }]
+```
+
+`HYPERDRIVE` が設定されている場合は `DATABASE_URL` より優先して使用します。
+ローカル開発時は `CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE` 環境変数に
+ローカルDBの接続文字列を設定してください。
+
+公式資料: [Workers Static Assets](https://developers.cloudflare.com/workers/static-assets/)、
+[PostgreSQL / Hyperdrive](https://developers.cloudflare.com/hyperdrive/examples/connect-to-postgres/)。
+
+## Render / Node.jsで引き続き実行する場合
+`.env.example` を `.env` にコピーし、`DATABASE_URL` を設定してください。
+`PORT` は未指定の場合3000を使用します。
+
+```bash
+npm run dev:node
+```
+
+Renderのビルド・起動コマンドは引き続き `npm run build` / `npm start` を使用できます。
+
+## APIの動作確認
+
+```bash
+curl http://localhost:8787/api/events/today
+curl -X POST http://localhost:8787/api/events/refresh
+```
+
+Node.js版はポートを3000（または `PORT` の指定値）に変更してください。
 
 ## 完了条件
 - ローカルで起動できる

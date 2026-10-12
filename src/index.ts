@@ -1,10 +1,8 @@
-import 'dotenv/config'
-import { readFile } from 'node:fs/promises'
-import { serve } from '@hono/node-server'
 import { parseScheduleEvents, type EventRecord } from './schedule.js'
 import { replaceMonthEventsForVenue } from './event-store.js'
 import { Hono } from 'hono'
 import { Pool, type QueryResultRow } from 'pg'
+import { createPool, type Bindings } from './database.js'
 
 type TodayEventsResponse = {
   date: string
@@ -25,11 +23,6 @@ type RefreshResponse = {
   warnings: string[]
 }
 
-type ScrapeResult = {
-  venueName: string
-  events: EventRecord[]
-}
-
 type VenueConfig = {
   venueName: string
   scheduleUrl: (month: string) => string
@@ -46,8 +39,6 @@ type EventRow = QueryResultRow & {
 }
 
 const JAPAN_TIME_ZONE = 'Asia/Tokyo'
-const DEFAULT_PORT = 3000
-const DATABASE_URL = process.env.DATABASE_URL
 
 const venueConfigs: VenueConfig[] = [
   {
@@ -60,54 +51,51 @@ const venueConfigs: VenueConfig[] = [
   }
 ]
 
-const app = new Hono()
+export function createApp(poolFactory: (env: Bindings) => Pool = createPool) {
+  const app = new Hono<{ Bindings: Bindings, Variables: { db: Pool } }>()
 
-let pool: Pool | null = null
-let schemaReady: Promise<void> | null = null
+  // Workers must not share open DB connections between requests.
+  app.use('/api/events/*', async (c, next) => {
+    let db: Pool | undefined
+    try {
+      db = poolFactory(c.env)
+      c.set('db', db)
+      await next()
+    } catch (error) {
+      return c.json({ error: getErrorMessage(error) }, 500)
+    } finally {
+      if (db) await db.end()
+    }
+  })
 
-app.get('/', async (c) => {
-  const html = await readFile(new URL('../public/index.html', import.meta.url), 'utf8')
-  return c.html(html)
-})
+  app.get('/api/events/today', async (c) => {
+    try {
+      const todayData = await getTodayEvents(c.get('db'))
+      return c.json(todayData)
+    } catch (error) {
+      return c.json({
+        error: getErrorMessage(error)
+      }, 500)
+    }
+  })
 
-app.get('/style.css', async (c) => {
-  const css = await readFile(new URL('../public/style.css', import.meta.url), 'utf8')
-  return c.body(css, 200, { 'Content-Type': 'text/css; charset=utf-8' })
-})
+  app.post('/api/events/refresh', async (c) => {
+    try {
+      const result = await refreshCurrentMonthEvents(c.get('db'))
+      return c.json(result)
+    } catch (error) {
+      return c.json({
+        error: getErrorMessage(error)
+      }, 500)
+    }
+  })
 
-app.get('/api/events/today', async (c) => {
-  try {
-    const todayData = await getTodayEvents()
-    return c.json(todayData)
-  } catch (error) {
-    return c.json({
-      error: getErrorMessage(error)
-    }, 500)
-  }
-})
+  return app
+}
 
-app.post('/api/events/refresh', async (c) => {
-  try {
-    const result = await refreshCurrentMonthEvents()
-    return c.json(result)
-  } catch (error) {
-    return c.json({
-      error: getErrorMessage(error)
-    }, 500)
-  }
-})
+export default createApp()
 
-const port = Number(process.env.PORT ?? DEFAULT_PORT)
-
-serve({
-  fetch: app.fetch,
-  port
-}, (info) => {
-  console.log(`Server is running on http://localhost:${info.port}`)
-})
-
-async function getTodayEvents(): Promise<TodayEventsResponse> {
-  const db = getPool()
+async function getTodayEvents(db: Pool): Promise<TodayEventsResponse> {
   await ensureSchema(db)
 
   const today = getTodayDateInJapan()
@@ -132,8 +120,7 @@ async function getTodayEvents(): Promise<TodayEventsResponse> {
   }
 }
 
-async function refreshCurrentMonthEvents(): Promise<RefreshResponse> {
-  const db = getPool()
+async function refreshCurrentMonthEvents(db: Pool): Promise<RefreshResponse> {
   await ensureSchema(db)
 
   const month = getCurrentMonthInJapan()
@@ -213,40 +200,22 @@ async function scrapeVenueEvents(venueConfig: VenueConfig, month: string): Promi
   return parseScheduleEvents(html, month, url, venueConfig.venueName)
 }
 
-function getPool(): Pool {
-  if (!DATABASE_URL) {
-    throw new Error('DATABASE_URL が設定されていません。')
-  }
-
-  if (!pool) {
-    pool = new Pool({
-      connectionString: DATABASE_URL
-    })
-  }
-
-  return pool
-}
-
 async function ensureSchema(db: Pool): Promise<void> {
-  if (!schemaReady) {
-    schemaReady = db.query(`
-      CREATE TABLE IF NOT EXISTS events (
-        id BIGSERIAL PRIMARY KEY,
-        venue_name TEXT NOT NULL,
-        event_date DATE NOT NULL,
-        title TEXT NOT NULL,
-        start_time TIME NULL,
-        end_time TIME NULL,
-        source_url TEXT NOT NULL,
-        fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      );
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS events (
+      id BIGSERIAL PRIMARY KEY,
+      venue_name TEXT NOT NULL,
+      event_date DATE NOT NULL,
+      title TEXT NOT NULL,
+      start_time TIME NULL,
+      end_time TIME NULL,
+      source_url TEXT NOT NULL,
+      fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
 
-      CREATE UNIQUE INDEX IF NOT EXISTS events_unique_idx
-        ON events (venue_name, event_date, title);
-    `).then(() => undefined)
-  }
-
-  await schemaReady
+    CREATE UNIQUE INDEX IF NOT EXISTS events_unique_idx
+      ON events (venue_name, event_date, title);
+  `)
 }
 
 function mapRowToResponseEvent(row: EventRow): TodayEventsResponse['events'][number] {

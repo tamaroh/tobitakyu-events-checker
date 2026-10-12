@@ -15,6 +15,10 @@ dist/
 # env
 .env
 .env.production
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
+.wrangler/
 
 # logs
 logs/
